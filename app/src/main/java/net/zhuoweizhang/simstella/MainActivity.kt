@@ -28,6 +28,7 @@ import com.google.protobuf.kotlin.toByteString
 import com.oculus.atc.EnableEncryption
 import com.oculus.atc.MessageTypeSetup
 import com.oculus.atc.RequestEncryption
+import com.oculus.atc.enableEncryption
 import com.oculus.atc.requestEncryption
 import java.nio.charset.StandardCharsets
 import java.security.KeyPairGenerator
@@ -184,7 +185,30 @@ class MainActivity : ComponentActivity() {
           MessageTypeSetup.ENABLE_ENCRYPTION_VALUE -> {
             val msg = EnableEncryption.parseFrom(protoData)
             println(msg)
-            sock.outputStream.write(bytes, 0, lengthRead)
+            val response = enableEncryption {
+              publicKey = ecBytes.toByteString()
+              seed = "A".repeat(32).toByteArray().toByteString()
+              iv = "A".repeat(16).toByteArray().toByteString()
+              base = 0x41414141 // this changes every time?
+              parameters = 31
+            }
+            val responseOut = response.toByteArray()
+            val replySize = 8 + responseOut.size
+            val reply = ByteArray(replySize)
+            val header =
+              byteArrayOf(
+                0x80.toByte(),
+                (replySize - 4).toByte(),
+                0x00,
+                0x01,
+                0x02,
+                0x00,
+                0x00,
+                0x02,
+              )
+            header.copyInto(reply, 0)
+            responseOut.copyInto(reply, 8)
+            sock.outputStream.write(reply)
           }
           else -> {
             sock.outputStream.write(bytes, 0, lengthRead)
