@@ -57,10 +57,17 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
-    implementation(libs.protobuf.javalite)
+    implementation(libs.protobuf.kotlinlite)
 }
 
 protobuf {
     protoc { artifact = "com.google.protobuf:protoc:4.33.0" }
-    generateProtoTasks { all().forEach { it.plugins { create("java") { option("lite") } } } }
+    generateProtoTasks {
+        all().forEach {
+            it.plugins {
+                create("java") { option("lite") }
+                create("kotlin")
+            }
+        }
+    }
 }

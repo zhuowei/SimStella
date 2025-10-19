@@ -23,13 +23,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import com.google.protobuf.ByteString
+import com.google.protobuf.kotlin.toByteString
+import com.oculus.atc.EnableEncryption
+import com.oculus.atc.MessageTypeSetup
+import com.oculus.atc.RequestEncryption
+import com.oculus.atc.requestEncryption
 import java.nio.charset.StandardCharsets
+import java.security.KeyPairGenerator
+import java.security.PublicKey
 import java.util.HexFormat
 import java.util.UUID
 import net.zhuoweizhang.simstella.ui.theme.SimStellaTheme
-import com.oculus.atc.MessageTypeSetup
-import com.oculus.atc.RequestEncryption
-import com.oculus.atc.EnableEncryption
 
 val fbGattServiceUuid = UUID.fromString("0000FD5F-0000-1000-8000-00805F9B34FB")
 val fbPsmCharacteristicUuid = UUID.fromString("05ACBE9F-6F61-4CA9-80BF-C8BBB52991C0")
@@ -79,6 +83,9 @@ class MainActivity : ComponentActivity() {
     // bluetoothGattServer.addService(makeFirmwareGattService())
     l2capChannel = bluetoothAdapter.listenUsingL2capChannel()
     println("!!!!l2cap: ${l2capChannel.psm}")
+    val keypairGenerator = KeyPairGenerator.getInstance("EC")
+    val keyPair = keypairGenerator.generateKeyPair()
+    val ecBytes = getBytesForPublicKey(keyPair.public)
     val listenThread =
       Thread() {
         while (true) {
@@ -91,21 +98,58 @@ class MainActivity : ComponentActivity() {
               val lengthRead = sock.inputStream.read(bytes)
               println("read bytes: ${HexFormat.of().formatHex(bytes, 0, lengthRead)}")
               if (lengthRead > 8 && bytes[4].toInt() != 3) {
-                val headerOff = if (bytes[4].toInt() == 2) { 4 } else { 8 }
-                val protoData = ByteString.copyFrom(bytes, headerOff + 4, lengthRead - (headerOff + 4))
+                val headerOff =
+                  if (bytes[4].toInt() == 2) {
+                    4
+                  } else {
+                    8
+                  }
+                val protoData =
+                  ByteString.copyFrom(bytes, headerOff + 4, lengthRead - (headerOff + 4))
                 val protoType = bytes[headerOff + 3].toInt()
                 when (protoType) {
                   MessageTypeSetup.REQUEST_ENCRYPTION_VALUE -> {
                     val msg = RequestEncryption.parseFrom(protoData)
                     println(msg)
+                    val response = requestEncryption {
+                      publicKey = ecBytes.toByteString()
+                      challenge = "0123456789abcdef".toByteArray().toByteString()
+                      ellipticCurve = 0
+                      supportedParameters = 31
+                    }
+                    val responseOut = response.toByteArray()
+                    val replySize = 12 + responseOut.size
+                    val reply = ByteArray(replySize)
+                    // 80608001 81000005 02000001
+                    val header =
+                      byteArrayOf(
+                        0x80.toByte(),
+                        (replySize - 4).toByte(),
+                        0x80.toByte(),
+                        0x01,
+                        0x81.toByte(),
+                        0x00,
+                        0x00,
+                        0x05,
+                        0x02,
+                        0x00,
+                        0x00,
+                        0x01,
+                      )
+                    header.copyInto(reply, 0)
+                    responseOut.copyInto(reply, 12)
+                    sock.outputStream.write(reply)
                   }
                   MessageTypeSetup.ENABLE_ENCRYPTION_VALUE -> {
                     val msg = EnableEncryption.parseFrom(protoData)
                     println(msg)
+                    sock.outputStream.write(bytes, 0, lengthRead)
+                  }
+                  else -> {
+                    sock.outputStream.write(bytes, 0, lengthRead)
                   }
                 }
               }
-              sock.outputStream.write(bytes, 0, lengthRead)
               if (lengthRead <= 0) {
                 break
               }
@@ -176,6 +220,12 @@ fun makeFirmwareGattService(): BluetoothGattService {
     )
   )
   return bluetoothGattService
+}
+
+fun getBytesForPublicKey(key: PublicKey): ByteArray {
+  val encoded = key.encoded
+  // too lazy to get a real asn1 parser, hardcode the offset
+  return encoded.copyOfRange(0x1b, 0x1b + 0x40)
 }
 
 @Composable
