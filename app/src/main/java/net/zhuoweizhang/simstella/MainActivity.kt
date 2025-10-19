@@ -8,6 +8,7 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothServerSocket
+import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -92,69 +93,7 @@ class MainActivity : ComponentActivity() {
           try {
             val sock = l2capChannel.accept()
             println("accepted a sock?!")
-            while (true) {
-              sock.inputStream.available()
-              val bytes = ByteArray(0x100)
-              val lengthRead = sock.inputStream.read(bytes)
-              println("read bytes: ${HexFormat.of().formatHex(bytes, 0, lengthRead)}")
-              if (lengthRead > 8 && bytes[4].toInt() != 3) {
-                val headerOff =
-                  if (bytes[4].toInt() == 2) {
-                    4
-                  } else {
-                    8
-                  }
-                val protoData =
-                  ByteString.copyFrom(bytes, headerOff + 4, lengthRead - (headerOff + 4))
-                val protoType = bytes[headerOff + 3].toInt()
-                when (protoType) {
-                  MessageTypeSetup.REQUEST_ENCRYPTION_VALUE -> {
-                    val msg = RequestEncryption.parseFrom(protoData)
-                    println(msg)
-                    val response = requestEncryption {
-                      publicKey = ecBytes.toByteString()
-                      challenge = "0123456789abcdef".toByteArray().toByteString()
-                      ellipticCurve = 0
-                      supportedParameters = 31
-                    }
-                    val responseOut = response.toByteArray()
-                    val replySize = 12 + responseOut.size
-                    val reply = ByteArray(replySize)
-                    // 80608001 81000005 02000001
-                    val header =
-                      byteArrayOf(
-                        0x80.toByte(),
-                        (replySize - 4).toByte(),
-                        0x80.toByte(),
-                        0x01,
-                        0x81.toByte(),
-                        0x00,
-                        0x00,
-                        0x05,
-                        0x02,
-                        0x00,
-                        0x00,
-                        0x01,
-                      )
-                    header.copyInto(reply, 0)
-                    responseOut.copyInto(reply, 12)
-                    sock.outputStream.write(reply)
-                  }
-                  MessageTypeSetup.ENABLE_ENCRYPTION_VALUE -> {
-                    val msg = EnableEncryption.parseFrom(protoData)
-                    println(msg)
-                    sock.outputStream.write(bytes, 0, lengthRead)
-                  }
-                  else -> {
-                    sock.outputStream.write(bytes, 0, lengthRead)
-                  }
-                }
-              }
-              if (lengthRead <= 0) {
-                break
-              }
-            }
-            sock.close()
+            handleSocket(sock, ecBytes)
           } catch (e: Exception) {
             e.printStackTrace()
             break
@@ -193,6 +132,70 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+  }
+
+  fun handleSocket(sock: BluetoothSocket, ecBytes: ByteArray) {
+    while (true) {
+      val bytes = ByteArray(0x100)
+      val lengthRead = sock.inputStream.read(bytes)
+      println("read bytes: ${HexFormat.of().formatHex(bytes, 0, lengthRead)}")
+      if (lengthRead > 8 && bytes[4].toInt() != 3) {
+        val headerOff =
+          if (bytes[4].toInt() == 2) {
+            4
+          } else {
+            8
+          }
+        val protoData = ByteString.copyFrom(bytes, headerOff + 4, lengthRead - (headerOff + 4))
+        val protoType = bytes[headerOff + 3].toInt()
+        when (protoType) {
+          MessageTypeSetup.REQUEST_ENCRYPTION_VALUE -> {
+            val msg = RequestEncryption.parseFrom(protoData)
+            println(msg)
+            val response = requestEncryption {
+              publicKey = ecBytes.toByteString()
+              challenge = "0123456789abcdef".toByteArray().toByteString()
+              ellipticCurve = 0
+              supportedParameters = 31
+            }
+            val responseOut = response.toByteArray()
+            val replySize = 12 + responseOut.size
+            val reply = ByteArray(replySize)
+            // 80608001 81000005 02000001
+            val header =
+              byteArrayOf(
+                0x80.toByte(),
+                (replySize - 4).toByte(),
+                0x80.toByte(),
+                0x01,
+                0x81.toByte(),
+                0x00,
+                0x00,
+                0x05,
+                0x02,
+                0x00,
+                0x00,
+                0x01,
+              )
+            header.copyInto(reply, 0)
+            responseOut.copyInto(reply, 12)
+            sock.outputStream.write(reply)
+          }
+          MessageTypeSetup.ENABLE_ENCRYPTION_VALUE -> {
+            val msg = EnableEncryption.parseFrom(protoData)
+            println(msg)
+            sock.outputStream.write(bytes, 0, lengthRead)
+          }
+          else -> {
+            sock.outputStream.write(bytes, 0, lengthRead)
+          }
+        }
+      }
+      if (lengthRead <= 0) {
+        break
+      }
+    }
+    sock.close()
   }
 }
 
