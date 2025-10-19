@@ -35,3 +35,14 @@ message EnableEncryption {
   bool phased_link_setup_supported = 7;
   int64 supported_link_setup_services = 8;
 }
+
+message LinkSetupConfig {
+  int64 required_link_setup_services = 1;
+}
+
+message EndLinkSetup {
+  int32 state = 1;
+  bytes uuid = 2;
+  bytes link_uuid = 3;
+  map<int32, bytes> user_data = 4;
+}
