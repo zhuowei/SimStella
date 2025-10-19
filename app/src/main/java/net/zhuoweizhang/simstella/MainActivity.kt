@@ -1,0 +1,171 @@
+package net.zhuoweizhang.simstella
+
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattServer
+import android.bluetooth.BluetoothGattServerCallback
+import android.bluetooth.BluetoothGattService
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothServerSocket
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.tooling.preview.Preview
+import java.nio.charset.StandardCharsets
+import java.util.HexFormat
+import java.util.UUID
+import net.zhuoweizhang.simstella.ui.theme.SimStellaTheme
+
+val fbGattServiceUuid = UUID.fromString("0000FD5F-0000-1000-8000-00805F9B34FB")
+val fbPsmCharacteristicUuid = UUID.fromString("05ACBE9F-6F61-4CA9-80BF-C8BBB52991C0")
+val firmwareGattServiceUuid = UUID.fromString("0000180A-0000-1000-8000-00805F9B34FB")
+val firmwareCharacteristicUuid = UUID.fromString("00002A26-0000-1000-8000-00805F9B34FB")
+
+class MainActivity : ComponentActivity() {
+  lateinit var l2capChannel: BluetoothServerSocket
+  lateinit var bluetoothGattServer: BluetoothGattServer
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    // too lazy to do the permissions thing
+    // pm grant net.zhuoweizhang.simstella android.permission.BLUETOOTH_CONNECT
+    // pm grant net.zhuoweizhang.simstella android.permission.BLUETOOTH_ADVERTISE
+    super.onCreate(savedInstanceState)
+    enableEdgeToEdge()
+    setContent {
+      SimStellaTheme {
+        Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+          Greeting(name = "Android", modifier = Modifier.padding(innerPadding))
+        }
+      }
+    }
+    val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+    val bluetoothAdapter = bluetoothManager.adapter
+    val advertisingData =
+      AdvertiseData.Builder()
+        .addManufacturerData(0x1ab, byteArrayOf(0x3, 0x1, 0x1))
+        .setIncludeDeviceName(true)
+        .build()
+    val advertiseSettings = AdvertiseSettings.Builder().setConnectable(true).build()
+    bluetoothAdapter.bluetoothLeAdvertiser.startAdvertising(
+      advertiseSettings,
+      advertisingData,
+      object : AdvertiseCallback() {
+        override fun onStartFailure(errorCode: Int) {
+          println("advertise start failure: $errorCode")
+        }
+
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+          println("advertise start success")
+        }
+      },
+    )
+    bluetoothGattServer = bluetoothManager.openGattServer(this, MyCallback())
+    bluetoothGattServer.addService(makeFbGattService())
+    // bluetoothGattServer.addService(makeFirmwareGattService())
+    l2capChannel = bluetoothAdapter.listenUsingL2capChannel()
+    println("!!!!l2cap: ${l2capChannel.psm}")
+    val listenThread =
+      Thread() {
+        while (true) {
+          try {
+            val sock = l2capChannel.accept()
+            println("accepted a sock?!")
+            while (true) {
+              sock.inputStream.available()
+              val bytes = ByteArray(0x100)
+              val lengthRead = sock.inputStream.read(bytes)
+              println("read bytes: ${HexFormat.of().formatHex(bytes, 0, lengthRead)}")
+              sock.outputStream.write(bytes, 0, lengthRead)
+              if (lengthRead <= 0) {
+                break
+              }
+            }
+            sock.close()
+          } catch (e: Exception) {
+            e.printStackTrace()
+            break
+          }
+        }
+      }
+    listenThread.start()
+  }
+
+  inner class MyCallback : BluetoothGattServerCallback() {
+    override fun onCharacteristicReadRequest(
+      device: BluetoothDevice?,
+      requestId: Int,
+      offset: Int,
+      characteristic: BluetoothGattCharacteristic?,
+    ) {
+      println("read characteristic $characteristic")
+      when (characteristic!!.uuid) {
+        firmwareCharacteristicUuid -> {
+          val buf = "ABCD".toByteArray(StandardCharsets.UTF_16)
+          bluetoothGattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, buf)
+        }
+        fbPsmCharacteristicUuid -> {
+          val port = l2capChannel.psm
+          val buf =
+            byteArrayOf(
+              0x41.toByte(),
+              0x42.toByte(),
+              (port and 0xff).toByte(),
+              (port shr 8).toByte(),
+            )
+          bluetoothGattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, buf)
+        }
+        else -> {
+          println("unknown characteristic $characteristic?")
+        }
+      }
+    }
+  }
+}
+
+fun makeFbGattService(): BluetoothGattService {
+  val bluetoothGattService =
+    BluetoothGattService(fbGattServiceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+  bluetoothGattService.addCharacteristic(
+    BluetoothGattCharacteristic(
+      fbPsmCharacteristicUuid,
+      BluetoothGattCharacteristic.PROPERTY_READ,
+      BluetoothGattCharacteristic.PERMISSION_READ,
+    )
+  )
+  return bluetoothGattService
+}
+
+fun makeFirmwareGattService(): BluetoothGattService {
+  val bluetoothGattService =
+    BluetoothGattService(firmwareGattServiceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+  bluetoothGattService.addCharacteristic(
+    BluetoothGattCharacteristic(
+      firmwareCharacteristicUuid,
+      BluetoothGattCharacteristic.PROPERTY_READ,
+      BluetoothGattCharacteristic.PERMISSION_READ,
+    )
+  )
+  return bluetoothGattService
+}
+
+@Composable
+fun Greeting(name: String, modifier: Modifier = Modifier) {
+  Text(text = "Hello $name!", modifier = modifier)
+}
+
+@Preview(showBackground = true)
+@Composable
+fun GreetingPreview() {
+  SimStellaTheme { Greeting("Android") }
+}
