@@ -22,10 +22,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import com.google.protobuf.ByteString
 import java.nio.charset.StandardCharsets
 import java.util.HexFormat
 import java.util.UUID
 import net.zhuoweizhang.simstella.ui.theme.SimStellaTheme
+import com.oculus.atc.MessageTypeSetup
+import com.oculus.atc.RequestEncryption
+import com.oculus.atc.EnableEncryption
 
 val fbGattServiceUuid = UUID.fromString("0000FD5F-0000-1000-8000-00805F9B34FB")
 val fbPsmCharacteristicUuid = UUID.fromString("05ACBE9F-6F61-4CA9-80BF-C8BBB52991C0")
@@ -86,6 +90,21 @@ class MainActivity : ComponentActivity() {
               val bytes = ByteArray(0x100)
               val lengthRead = sock.inputStream.read(bytes)
               println("read bytes: ${HexFormat.of().formatHex(bytes, 0, lengthRead)}")
+              if (lengthRead > 8 && bytes[4].toInt() != 3) {
+                val headerOff = if (bytes[4].toInt() == 2) { 4 } else { 8 }
+                val protoData = ByteString.copyFrom(bytes, headerOff + 4, lengthRead - (headerOff + 4))
+                val protoType = bytes[headerOff + 3].toInt()
+                when (protoType) {
+                  MessageTypeSetup.REQUEST_ENCRYPTION_VALUE -> {
+                    val msg = RequestEncryption.parseFrom(protoData)
+                    println(msg)
+                  }
+                  MessageTypeSetup.ENABLE_ENCRYPTION_VALUE -> {
+                    val msg = EnableEncryption.parseFrom(protoData)
+                    println(msg)
+                  }
+                }
+              }
               sock.outputStream.write(bytes, 0, lengthRead)
               if (lengthRead <= 0) {
                 break

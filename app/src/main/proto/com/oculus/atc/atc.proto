@@ -1,0 +1,37 @@
+edition = "2024";
+
+option features.enforce_naming_style = STYLE_LEGACY;
+
+package com.oculus.atc;
+
+enum MessageTypeSetup {
+  UNKNOWN = 0;
+  REQUEST_ENCRYPTION = 0x1;
+  ENABLE_ENCRYPTION = 0x2;
+  LINK_SETUP_CONFIG = 0x3;
+  END_LINK_SETUP = 0x1000;
+  // below aren't supported by the initial link code...
+  BYPASS_LINK_SETUP_2P = 0x2000;
+  IDENTIFY_3P = 0x2001;
+  ASSOCIATE_3P = 0x2002;
+}
+
+message RequestEncryption {
+  bytes public_key = 1;
+  bytes challenge = 2;
+  int32 elliptic_curve = 3;
+  int32 supported_parameters = 4;
+  repeated bytes key_hint = 5;
+  int32 quirks = 6;
+}
+
+message EnableEncryption {
+  bytes public_key = 1;
+  bytes seed = 2;
+  bytes iv = 3;
+  int32 base = 4;
+  int32 parameters = 5;
+  int32 quirks = 6;
+  bool phased_link_setup_supported = 7;
+  int64 supported_link_setup_services = 8;
+}
