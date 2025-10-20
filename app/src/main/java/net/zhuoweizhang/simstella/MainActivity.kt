@@ -31,10 +31,14 @@ import com.oculus.atc.RequestEncryption
 import com.oculus.atc.enableEncryption
 import com.oculus.atc.requestEncryption
 import java.nio.charset.StandardCharsets
+import java.security.KeyFactory
+import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.PublicKey
+import java.security.spec.X509EncodedKeySpec
 import java.util.HexFormat
 import java.util.UUID
+import javax.crypto.KeyAgreement
 import net.zhuoweizhang.simstella.ui.theme.SimStellaTheme
 
 val fbGattServiceUuid = UUID.fromString("0000FD5F-0000-1000-8000-00805F9B34FB")
@@ -94,7 +98,7 @@ class MainActivity : ComponentActivity() {
           try {
             val sock = l2capChannel.accept()
             println("accepted a sock?!")
-            handleSocket(sock, ecBytes)
+            handleSocket(sock, ecBytes, keyPair)
           } catch (e: Exception) {
             e.printStackTrace()
             break
@@ -135,7 +139,7 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  fun handleSocket(sock: BluetoothSocket, ecBytes: ByteArray) {
+  fun handleSocket(sock: BluetoothSocket, ecBytes: ByteArray, ecKeyPair: KeyPair) {
     while (true) {
       val bytes = ByteArray(0x100)
       val lengthRead = sock.inputStream.read(bytes)
@@ -190,6 +194,7 @@ class MainActivity : ComponentActivity() {
               seed = "A".repeat(32).toByteArray().toByteString()
               iv = "A".repeat(16).toByteArray().toByteString()
               base = 0x41414141 // this changes every time?
+              // 1 << 1 is multiplexing; not sure about others
               parameters = 31
             }
             val responseOut = response.toByteArray()
@@ -209,6 +214,12 @@ class MainActivity : ComponentActivity() {
             header.copyInto(reply, 0)
             responseOut.copyInto(reply, 8)
             sock.outputStream.write(reply)
+            val remotePublicKey = makeRemotePublicKey(msg.publicKey)
+            val keyAgreement = KeyAgreement.getInstance("ECDH")
+            keyAgreement.init(ecKeyPair.private)
+            keyAgreement.doPhase(remotePublicKey, true)
+            val sharedSecret = keyAgreement.generateSecret()
+            println("dh: ${HexFormat.of().formatHex(sharedSecret)}")
           }
           else -> {
             sock.outputStream.write(bytes, 0, lengthRead)
@@ -253,6 +264,47 @@ fun getBytesForPublicKey(key: PublicKey): ByteArray {
   val encoded = key.encoded
   // too lazy to get a real asn1 parser, hardcode the offset
   return encoded.copyOfRange(0x1b, 0x1b + 0x40)
+}
+
+val EC_ASN1_HEADER =
+  byteArrayOf(
+    0x30,
+    0x59,
+    0x30,
+    0x13,
+    0x06,
+    0x07,
+    0x2a,
+    0x86.toByte(),
+    0x48,
+    0xce.toByte(),
+    0x3d,
+    0x02,
+    0x01,
+    0x06,
+    0x08,
+    0x2a,
+    0x86.toByte(),
+    0x48,
+    0xce.toByte(),
+    0x3d,
+    0x03,
+    0x01,
+    0x07,
+    0x03,
+    0x42,
+    0x00,
+    0x04,
+  )
+
+fun makeRemotePublicKey(bytes: ByteString): PublicKey {
+  val keyFactory = KeyFactory.getInstance("EC")
+  // no real asn1 writer here...
+  val asn1Bytes = ByteArray(0x1b + 0x40)
+  EC_ASN1_HEADER.copyInto(asn1Bytes, 0)
+  bytes.copyTo(asn1Bytes, 0x1b)
+  val pkSpec = X509EncodedKeySpec(asn1Bytes)
+  return keyFactory.generatePublic(pkSpec)
 }
 
 @Composable
