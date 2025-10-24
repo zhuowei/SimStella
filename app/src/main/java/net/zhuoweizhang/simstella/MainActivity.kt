@@ -34,11 +34,14 @@ import java.nio.charset.StandardCharsets
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.MessageDigest
 import java.security.PublicKey
 import java.security.spec.X509EncodedKeySpec
 import java.util.HexFormat
 import java.util.UUID
 import javax.crypto.KeyAgreement
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import net.zhuoweizhang.simstella.ui.theme.SimStellaTheme
 
 val fbGattServiceUuid = UUID.fromString("0000FD5F-0000-1000-8000-00805F9B34FB")
@@ -192,8 +195,8 @@ class MainActivity : ComponentActivity() {
             val response = enableEncryption {
               publicKey = ecBytes.toByteString()
               seed = "A".repeat(32).toByteArray().toByteString()
-              iv = "A".repeat(16).toByteArray().toByteString()
-              base = 0x41414141 // this changes every time?
+              iv = "B".repeat(16).toByteArray().toByteString()
+              base = 0x41424344 // this changes every time?
               // 1 << 1 is multiplexing; not sure about others
               parameters = 31
             }
@@ -220,6 +223,7 @@ class MainActivity : ComponentActivity() {
             keyAgreement.doPhase(remotePublicKey, true)
             val sharedSecret = keyAgreement.generateSecret()
             println("dh: ${HexFormat.of().formatHex(sharedSecret)}")
+            val hashedSharedSecret = MessageDigest.getInstance("SHA-256").digest(sharedSecret)
           }
           else -> {
             sock.outputStream.write(bytes, 0, lengthRead)
@@ -305,6 +309,31 @@ fun makeRemotePublicKey(bytes: ByteString): PublicKey {
   bytes.copyTo(asn1Bytes, 0x1b)
   val pkSpec = X509EncodedKeySpec(asn1Bytes)
   return keyFactory.generatePublic(pkSpec)
+}
+
+fun computeEncryptionKey(
+  sharedSecret: ByteArray,
+  challenge: ByteArray,
+  seed: ByteArray,
+): ByteArray {
+  val md = MessageDigest.getInstance("SHA-256")
+  md.update(challenge)
+  val firstHmacSecret = md.digest(seed)
+
+  val hmac = Mac.getInstance("HmacSHA256")
+  hmac.init(SecretKeySpec(firstHmacSecret, "HmacSHA256"))
+  hmac.update(sharedSecret)
+  val hmac1 = hmac.doFinal()
+
+  hmac.reset()
+
+  hmac.init(SecretKeySpec(hmac1, "HmacSHA256"))
+  hmac.update("AirShield".toByteArray())
+  hmac.update(0x01)
+  val hmac2 = hmac.doFinal()
+
+  // TODO: also the hmac key...
+  return hmac2
 }
 
 @Composable
