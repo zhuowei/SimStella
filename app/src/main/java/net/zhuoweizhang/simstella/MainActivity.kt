@@ -13,6 +13,7 @@ import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.os.Bundle
+import android.os.ParcelUuid
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -75,6 +76,7 @@ class MainActivity : ComponentActivity() {
     val advertisingData =
       AdvertiseData.Builder()
         .addManufacturerData(0x1ab, byteArrayOf(0x3, 0x1, 0x1))
+        .addServiceUuid(ParcelUuid(fbGattServiceUuid))
         .setIncludeDeviceName(true)
         .build()
     val advertiseSettings = AdvertiseSettings.Builder().setConnectable(true).build()

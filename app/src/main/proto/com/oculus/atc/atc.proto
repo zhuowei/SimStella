@@ -29,7 +29,7 @@ message EnableEncryption {
   bytes public_key = 1;
   bytes seed = 2;
   bytes iv = 3;
-  int32 base = 4;
+  uint32 base = 4;
   int32 parameters = 5;
   int32 quirks = 6;
   bool phased_link_setup_supported = 7;
