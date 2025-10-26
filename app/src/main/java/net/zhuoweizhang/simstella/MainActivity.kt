@@ -76,7 +76,7 @@ class MainActivity : ComponentActivity() {
     val advertisingData =
       AdvertiseData.Builder()
         .addManufacturerData(0x1ab, byteArrayOf(0x3, 0x1, 0x1))
-        .addServiceUuid(ParcelUuid(fbGattServiceUuid))
+        //.addServiceUuid(ParcelUuid(fbGattServiceUuid))
         .setIncludeDeviceName(true)
         .build()
     val advertiseSettings = AdvertiseSettings.Builder().setConnectable(true).build()
