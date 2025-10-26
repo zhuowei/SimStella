@@ -155,6 +155,8 @@ class MainActivity : ComponentActivity() {
     var decryptionCipher: Cipher? = null
     var encryptionHmacKey: SecretKeySpec? = null
     var decryptionHmacKey: SecretKeySpec? = null
+    var encryptionHmacBase: Int = 0
+    var decryptionHmacBase: Int = 0
     while (true) {
       val bytes = ByteArray(0x100)
       val lengthRead = sock.inputStream.read(bytes)
@@ -278,6 +280,9 @@ class MainActivity : ComponentActivity() {
             decryptionParameters.init(remoteEnableEncryptionMessage.iv.toByteArray(), "RAW")
             decryptionCipher = Cipher.getInstance("AES/CBC/NoPadding")
             decryptionCipher.init(Cipher.DECRYPT_MODE, decryptionKey, decryptionParameters)
+
+            encryptionHmacBase = localEnableEncryptionMessage.base
+            decryptionHmacBase = remoteEnableEncryptionMessage.base
           }
           else -> {
             sock.outputStream.write(bytes, 0, lengthRead)
@@ -285,35 +290,31 @@ class MainActivity : ComponentActivity() {
         }
       } else if (lengthRead >= 1 + 8 + 1 && bytes[0] == 0x40.toByte()) {
         val encryptedData = bytes.copyOfRange(1 + 8 + 1, lengthRead)
-        val decryptedData = decryptionCipher!!.doFinal(encryptedData)
+        val decryptedData = decryptionCipher!!.update(encryptedData)
         println("decrypted bytes: ${HexFormat.of().formatHex(decryptedData)}")
         val hmac = Mac.getInstance("HmacSHA256")
 
         val baseBytes =
-          ByteBuffer.allocate(4)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .putInt(remoteEnableEncryptionMessage!!.base)
-            .array()
+          ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(decryptionHmacBase).array()
         val hmacInput =
           byteArrayOf(0x02, 0x02, 0x00, 0x00) + baseBytes + bytes.copyOfRange(1 + 8, lengthRead)
 
         hmac.init(decryptionHmacKey!!)
         val hmacOutput = hmac.doFinal(hmacInput)
         println("hmac out: ${HexFormat.of().formatHex(hmacOutput)}")
+        decryptionHmacBase += 1
 
         // write it back...
-        val outputEncryptedData = encryptionCipher!!.doFinal(decryptedData)
+        val outputEncryptedData = encryptionCipher!!.update(decryptedData)
         val outputEncryptedDataWithHeader = byteArrayOf(0x00) + outputEncryptedData
         val outputBaseBytes =
-          ByteBuffer.allocate(4)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .putInt(localEnableEncryptionMessage!!.base)
-            .array()
+          ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(encryptionHmacBase).array()
         val outputHmacInput =
           byteArrayOf(0x02, 0x02, 0x00, 0x00) + outputBaseBytes + outputEncryptedDataWithHeader
         hmac.reset()
         hmac.init(encryptionHmacKey)
         val outputHmacOutput = hmac.doFinal(outputHmacInput)
+        encryptionHmacBase += 1
 
         val outputPacketData =
           byteArrayOf(0x40) + outputHmacOutput.copyOfRange(0, 8) + outputEncryptedDataWithHeader
