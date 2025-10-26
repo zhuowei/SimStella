@@ -30,6 +30,8 @@ import com.oculus.atc.MessageTypeSetup
 import com.oculus.atc.RequestEncryption
 import com.oculus.atc.enableEncryption
 import com.oculus.atc.requestEncryption
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.security.AlgorithmParameters
 import java.security.KeyFactory
@@ -151,6 +153,8 @@ class MainActivity : ComponentActivity() {
     var localEnableEncryptionMessage: EnableEncryption? = null
     var encryptionCipher: Cipher? = null
     var decryptionCipher: Cipher? = null
+    var encryptionHmacKey: SecretKeySpec? = null
+    var decryptionHmacKey: SecretKeySpec? = null
     while (true) {
       val bytes = ByteArray(0x100)
       val lengthRead = sock.inputStream.read(bytes)
@@ -241,24 +245,29 @@ class MainActivity : ComponentActivity() {
                 remoteRequestEncryptionMessage!!.challenge.toByteArray(),
                 localEnableEncryptionMessage.seed.toByteArray(),
               )
-            val encryptionHmacKey =
+            encryptionHmacKey =
               computeHmacKey(
                 sharedSecret,
                 remoteRequestEncryptionMessage.challenge.toByteArray(),
                 localEnableEncryptionMessage.seed.toByteArray(),
               )
+            println("encryptionHmacKey: ${HexFormat.of().formatHex(encryptionHmacKey.encoded)}")
             val decryptionKey =
               computeEncryptionKey(
                 sharedSecret,
                 localRequestEncryptionMessage!!.challenge.toByteArray(),
                 remoteEnableEncryptionMessage.seed.toByteArray(),
               )
-            val decryptionHmacKey =
+            decryptionHmacKey =
               computeHmacKey(
                 sharedSecret,
                 localRequestEncryptionMessage.challenge.toByteArray(),
                 remoteEnableEncryptionMessage.seed.toByteArray(),
               )
+            println(
+              "decryptionHmacKey: ${
+              HexFormat.of().formatHex(decryptionHmacKey.encoded)}"
+            )
 
             val encryptionParameters = AlgorithmParameters.getInstance("AES")
             encryptionParameters.init(localEnableEncryptionMessage.iv.toByteArray(), "RAW")
@@ -278,6 +287,38 @@ class MainActivity : ComponentActivity() {
         val encryptedData = bytes.copyOfRange(1 + 8 + 1, lengthRead)
         val decryptedData = decryptionCipher!!.doFinal(encryptedData)
         println("decrypted bytes: ${HexFormat.of().formatHex(decryptedData)}")
+        val hmac = Mac.getInstance("HmacSHA256")
+
+        val baseBytes =
+          ByteBuffer.allocate(4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(remoteEnableEncryptionMessage!!.base)
+            .array()
+        val hmacInput =
+          byteArrayOf(0x02, 0x02, 0x00, 0x00) + baseBytes + bytes.copyOfRange(1 + 8, lengthRead)
+
+        hmac.init(decryptionHmacKey!!)
+        val hmacOutput = hmac.doFinal(hmacInput)
+        println("hmac out: ${HexFormat.of().formatHex(hmacOutput)}")
+
+        // write it back...
+        val outputEncryptedData = encryptionCipher!!.doFinal(decryptedData)
+        val outputEncryptedDataWithHeader = byteArrayOf(0x00) + outputEncryptedData
+        val outputBaseBytes =
+          ByteBuffer.allocate(4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(localEnableEncryptionMessage!!.base)
+            .array()
+        val outputHmacInput =
+          byteArrayOf(0x02, 0x02, 0x00, 0x00) + outputBaseBytes + outputEncryptedDataWithHeader
+        hmac.reset()
+        hmac.init(encryptionHmacKey)
+        val outputHmacOutput = hmac.doFinal(outputHmacInput)
+
+        val outputPacketData =
+          byteArrayOf(0x40) + outputHmacOutput.copyOfRange(0, 8) + outputEncryptedDataWithHeader
+        println("sending: ${HexFormat.of().formatHex(outputPacketData)}")
+        sock.outputStream.write(outputPacketData)
       }
       if (lengthRead <= 0) {
         break
@@ -372,12 +413,13 @@ fun computeEncryptionKey(
   return SecretKeySpec(keyBytes, "AES")
 }
 
-fun computeHmacKey(sharedSecret: ByteArray, challenge: ByteArray, seed: ByteArray): ByteArray {
+fun computeHmacKey(sharedSecret: ByteArray, challenge: ByteArray, seed: ByteArray): SecretKeySpec {
   val md = MessageDigest.getInstance("SHA-256")
   md.update(seed)
   md.update(challenge)
   val hkdfSalt = md.digest("hmac_derive".toByteArray())
-  return terribleHkdf(sharedSecret, hkdfSalt, "AirShield".toByteArray())
+  val keyBytes = terribleHkdf(sharedSecret, hkdfSalt, "AirShield".toByteArray())
+  return SecretKeySpec(keyBytes, "HmacSHA256")
 }
 
 /** minimal https://datatracker.ietf.org/doc/html/rfc5869 HKDF, only supports length=0x20 */
