@@ -13,7 +13,6 @@ import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.os.Bundle
-import android.os.ParcelUuid
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -76,7 +75,7 @@ class MainActivity : ComponentActivity() {
     val advertisingData =
       AdvertiseData.Builder()
         .addManufacturerData(0x1ab, byteArrayOf(0x3, 0x1, 0x1))
-        //.addServiceUuid(ParcelUuid(fbGattServiceUuid))
+        // .addServiceUuid(ParcelUuid(fbGattServiceUuid))
         .setIncludeDeviceName(true)
         .build()
     val advertiseSettings = AdvertiseSettings.Builder().setConnectable(true).build()
@@ -159,6 +158,7 @@ class MainActivity : ComponentActivity() {
     var decryptionHmacKey: SecretKeySpec? = null
     var encryptionHmacBase: Int = 0
     var decryptionHmacBase: Int = 0
+    val multiplexingEnabled = false
     while (true) {
       val bytes = ByteArray(0x100)
       val lengthRead = sock.inputStream.read(bytes)
@@ -181,7 +181,12 @@ class MainActivity : ComponentActivity() {
               publicKey = ecBytes.toByteString()
               challenge = "0123456789abcdef".toByteArray().toByteString()
               ellipticCurve = 0
-              supportedParameters = 31
+              supportedParameters =
+                if (multiplexingEnabled) {
+                  31
+                } else {
+                  7
+                }
             }
             localRequestEncryptionMessage = response
             val responseOut = response.toByteArray()
@@ -217,7 +222,12 @@ class MainActivity : ComponentActivity() {
               iv = "B".repeat(16).toByteArray().toByteString()
               base = 0x41424344 // this changes every time?
               // 1 << 1 is multiplexing; not sure about others
-              parameters = 31
+              parameters =
+                if (multiplexingEnabled) {
+                  31
+                } else {
+                  7
+                }
             }
             localEnableEncryptionMessage = response
             val responseOut = response.toByteArray()
@@ -248,12 +258,14 @@ class MainActivity : ComponentActivity() {
                 sharedSecret,
                 remoteRequestEncryptionMessage!!.challenge.toByteArray(),
                 localEnableEncryptionMessage.seed.toByteArray(),
+                multiplexingEnabled,
               )
             encryptionHmacKey =
               computeHmacKey(
                 sharedSecret,
                 remoteRequestEncryptionMessage.challenge.toByteArray(),
                 localEnableEncryptionMessage.seed.toByteArray(),
+                multiplexingEnabled,
               )
             println("encryptionHmacKey: ${HexFormat.of().formatHex(encryptionHmacKey.encoded)}")
             val decryptionKey =
@@ -261,12 +273,14 @@ class MainActivity : ComponentActivity() {
                 sharedSecret,
                 localRequestEncryptionMessage!!.challenge.toByteArray(),
                 remoteEnableEncryptionMessage.seed.toByteArray(),
+                multiplexingEnabled,
               )
             decryptionHmacKey =
               computeHmacKey(
                 sharedSecret,
                 localRequestEncryptionMessage.challenge.toByteArray(),
                 remoteEnableEncryptionMessage.seed.toByteArray(),
+                multiplexingEnabled,
               )
             println(
               "decryptionHmacKey: ${
@@ -298,8 +312,13 @@ class MainActivity : ComponentActivity() {
 
         val baseBytes =
           ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(decryptionHmacBase).array()
-        val hmacInput =
-          byteArrayOf(0x02, 0x02, 0x00, 0x00) + baseBytes + bytes.copyOfRange(1 + 8, lengthRead)
+        val hmacMultiplexHeader =
+          if (multiplexingEnabled) {
+            byteArrayOf(0x02, 0x02, 0x00, 0x00)
+          } else {
+            byteArrayOf()
+          }
+        val hmacInput = hmacMultiplexHeader + baseBytes + bytes.copyOfRange(1 + 8, lengthRead)
 
         hmac.init(decryptionHmacKey!!)
         val hmacOutput = hmac.doFinal(hmacInput)
@@ -311,8 +330,7 @@ class MainActivity : ComponentActivity() {
         val outputEncryptedDataWithHeader = byteArrayOf(0x00) + outputEncryptedData
         val outputBaseBytes =
           ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(encryptionHmacBase).array()
-        val outputHmacInput =
-          byteArrayOf(0x02, 0x02, 0x00, 0x00) + outputBaseBytes + outputEncryptedDataWithHeader
+        val outputHmacInput = hmacMultiplexHeader + outputBaseBytes + outputEncryptedDataWithHeader
         hmac.reset()
         hmac.init(encryptionHmacKey)
         val outputHmacOutput = hmac.doFinal(outputHmacInput)
@@ -408,20 +426,47 @@ fun computeEncryptionKey(
   sharedSecret: ByteArray,
   challenge: ByteArray,
   seed: ByteArray,
+  multiplexingEnabled: Boolean,
 ): SecretKeySpec {
+  val sharedSecretHash = MessageDigest.getInstance("SHA-256").digest(sharedSecret)
   val md = MessageDigest.getInstance("SHA-256")
+  if (!multiplexingEnabled) {
+    md.update(sharedSecretHash)
+  }
   md.update(challenge)
   val hkdfSalt = md.digest(seed)
-  val keyBytes = terribleHkdf(sharedSecret, hkdfSalt, "AirShield".toByteArray())
+  val hkdfInputKeyMaterial =
+    if (multiplexingEnabled) {
+      sharedSecret
+    } else {
+      sharedSecretHash
+    }
+  val keyBytes = terribleHkdf(hkdfInputKeyMaterial, hkdfSalt, "AirShield".toByteArray())
   return SecretKeySpec(keyBytes, "AES")
 }
 
-fun computeHmacKey(sharedSecret: ByteArray, challenge: ByteArray, seed: ByteArray): SecretKeySpec {
+fun computeHmacKey(
+  sharedSecret: ByteArray,
+  challenge: ByteArray,
+  seed: ByteArray,
+  multiplexingEnabled: Boolean,
+): SecretKeySpec {
+  val sharedSecretHash = MessageDigest.getInstance("SHA-256").digest(sharedSecret)
   val md = MessageDigest.getInstance("SHA-256")
   md.update(seed)
   md.update(challenge)
-  val hkdfSalt = md.digest("hmac_derive".toByteArray())
-  val keyBytes = terribleHkdf(sharedSecret, hkdfSalt, "AirShield".toByteArray())
+  md.update("hmac_derive".toByteArray())
+  if (!multiplexingEnabled) {
+    md.update(sharedSecretHash)
+  }
+  val hkdfSalt = md.digest()
+  val hkdfInputKeyMaterial =
+    if (multiplexingEnabled) {
+      sharedSecret
+    } else {
+      sharedSecretHash
+    }
+  val keyBytes = terribleHkdf(hkdfInputKeyMaterial, hkdfSalt, "AirShield".toByteArray())
   return SecretKeySpec(keyBytes, "HmacSHA256")
 }
 
