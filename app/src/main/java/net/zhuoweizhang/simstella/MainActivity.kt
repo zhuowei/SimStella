@@ -53,6 +53,10 @@ val fbPsmCharacteristicUuid = UUID.fromString("05ACBE9F-6F61-4CA9-80BF-C8BBB5299
 val firmwareGattServiceUuid = UUID.fromString("0000180A-0000-1000-8000-00805F9B34FB")
 val firmwareCharacteristicUuid = UUID.fromString("00002A26-0000-1000-8000-00805F9B34FB")
 
+val PROTOCOL_WITH_FLAGS_0 = 0
+val PROTOCOL_WITH_FLAGS_7 = 7
+val PROTOCOL_WITH_FLAGS_31 = 31
+
 class MainActivity : ComponentActivity() {
   lateinit var l2capChannel: BluetoothServerSocket
   lateinit var bluetoothGattServer: BluetoothGattServer
@@ -159,11 +163,23 @@ class MainActivity : ComponentActivity() {
     var encryptionHmacBase: Int = 0
     var decryptionHmacBase: Int = 0
     val multiplexingEnabled = false
+    val encryptionHasInitial40 = false
+    val initial40Len =
+      if (encryptionHasInitial40) {
+        1
+      } else {
+        0
+      }
     while (true) {
       val bytes = ByteArray(0x100)
       val lengthRead = sock.inputStream.read(bytes)
       println("read bytes: ${HexFormat.of().formatHex(bytes, 0, lengthRead)}")
-      if (lengthRead > 8 && bytes[0] == 0x80.toByte() && bytes[4].toInt() != 3) {
+      if (
+        encryptionCipher == null &&
+          lengthRead > 8 &&
+          bytes[0] == 0x80.toByte() &&
+          bytes[4].toInt() != 3
+      ) {
         val headerOff =
           if (bytes[4].toInt() == 2) {
             4
@@ -185,7 +201,7 @@ class MainActivity : ComponentActivity() {
                 if (multiplexingEnabled) {
                   31
                 } else {
-                  7
+                  0 // 7
                 }
             }
             localRequestEncryptionMessage = response
@@ -222,12 +238,13 @@ class MainActivity : ComponentActivity() {
               iv = "B".repeat(16).toByteArray().toByteString()
               base = 0x41424344 // this changes every time?
               // 1 << 1 is multiplexing; not sure about others
-              parameters =
-                if (multiplexingEnabled) {
-                  31
-                } else {
-                  7
-                }
+              if (multiplexingEnabled) {
+                parameters = 31
+              } else if (encryptionHasInitial40) {
+                parameters = 7
+              } else {
+                // the actual device doesn't set this...
+              }
             }
             localEnableEncryptionMessage = response
             val responseOut = response.toByteArray()
@@ -253,19 +270,28 @@ class MainActivity : ComponentActivity() {
             keyAgreement.doPhase(remotePublicKey, true)
             val sharedSecret = keyAgreement.generateSecret()
             println("dh: ${HexFormat.of().formatHex(sharedSecret)}")
+
+            val protocolVersion =
+              when {
+                !encryptionHasInitial40 -> PROTOCOL_WITH_FLAGS_0
+                !multiplexingEnabled -> PROTOCOL_WITH_FLAGS_7
+                else -> PROTOCOL_WITH_FLAGS_31
+              }
+
             val encryptionKey =
               computeEncryptionKey(
                 sharedSecret,
                 remoteRequestEncryptionMessage!!.challenge.toByteArray(),
                 localEnableEncryptionMessage.seed.toByteArray(),
-                multiplexingEnabled,
+                protocolVersion,
               )
+            println("encryptionKey: ${HexFormat.of().formatHex(encryptionKey.encoded)}")
             encryptionHmacKey =
               computeHmacKey(
                 sharedSecret,
                 remoteRequestEncryptionMessage.challenge.toByteArray(),
                 localEnableEncryptionMessage.seed.toByteArray(),
-                multiplexingEnabled,
+                protocolVersion,
               )
             println("encryptionHmacKey: ${HexFormat.of().formatHex(encryptionHmacKey.encoded)}")
             val decryptionKey =
@@ -273,14 +299,15 @@ class MainActivity : ComponentActivity() {
                 sharedSecret,
                 localRequestEncryptionMessage!!.challenge.toByteArray(),
                 remoteEnableEncryptionMessage.seed.toByteArray(),
-                multiplexingEnabled,
+                protocolVersion,
               )
+            println("decryptionKey: ${HexFormat.of().formatHex(decryptionKey.encoded)}")
             decryptionHmacKey =
               computeHmacKey(
                 sharedSecret,
                 localRequestEncryptionMessage.challenge.toByteArray(),
                 remoteEnableEncryptionMessage.seed.toByteArray(),
-                multiplexingEnabled,
+                protocolVersion,
               )
             println(
               "decryptionHmacKey: ${
@@ -304,8 +331,10 @@ class MainActivity : ComponentActivity() {
             sock.outputStream.write(bytes, 0, lengthRead)
           }
         }
-      } else if (lengthRead >= 1 + 8 + 1 && bytes[0] == 0x40.toByte()) {
-        val encryptedData = bytes.copyOfRange(1 + 8 + 1, lengthRead)
+      } else if (
+        lengthRead >= initial40Len + 8 + 1 && (!encryptionHasInitial40 || bytes[0] == 0x40.toByte())
+      ) {
+        val encryptedData = bytes.copyOfRange(initial40Len + 8 + 1, lengthRead)
         val decryptedData = decryptionCipher!!.update(encryptedData)
         println("decrypted bytes: ${HexFormat.of().formatHex(decryptedData)}")
         val hmac = Mac.getInstance("HmacSHA256")
@@ -318,7 +347,8 @@ class MainActivity : ComponentActivity() {
           } else {
             byteArrayOf()
           }
-        val hmacInput = hmacMultiplexHeader + baseBytes + bytes.copyOfRange(1 + 8, lengthRead)
+        val hmacInput =
+          hmacMultiplexHeader + baseBytes + bytes.copyOfRange(initial40Len + 8, lengthRead)
 
         hmac.init(decryptionHmacKey!!)
         val hmacOutput = hmac.doFinal(hmacInput)
@@ -337,7 +367,11 @@ class MainActivity : ComponentActivity() {
         encryptionHmacBase += 1
 
         val outputPacketData =
-          byteArrayOf(0x40) + outputHmacOutput.copyOfRange(0, 8) + outputEncryptedDataWithHeader
+          if (encryptionHasInitial40) {
+            byteArrayOf(0x40)
+          } else {
+            byteArrayOf()
+          } + outputHmacOutput.copyOfRange(0, 8) + outputEncryptedDataWithHeader
         println("sending: ${HexFormat.of().formatHex(outputPacketData)}")
         sock.outputStream.write(outputPacketData)
       }
@@ -426,8 +460,17 @@ fun computeEncryptionKey(
   sharedSecret: ByteArray,
   challenge: ByteArray,
   seed: ByteArray,
-  multiplexingEnabled: Boolean,
-): SecretKeySpec {
+  protocolVersion: Int,
+) = SecretKeySpec(computeEncryptionKeyImpl(sharedSecret, challenge, seed, protocolVersion), "AES")
+
+fun computeEncryptionKeyImpl(
+  sharedSecret: ByteArray,
+  challenge: ByteArray,
+  seed: ByteArray,
+  protocolVersion: Int,
+): ByteArray {
+  val multiplexingEnabled = protocolVersion == PROTOCOL_WITH_FLAGS_31
+  val hkdfEnabled = protocolVersion != PROTOCOL_WITH_FLAGS_0
   val sharedSecretHash = MessageDigest.getInstance("SHA-256").digest(sharedSecret)
   val md = MessageDigest.getInstance("SHA-256")
   if (!multiplexingEnabled) {
@@ -435,22 +478,33 @@ fun computeEncryptionKey(
   }
   md.update(challenge)
   val hkdfSalt = md.digest(seed)
+  if (!hkdfEnabled) {
+    return hkdfSalt
+  }
   val hkdfInputKeyMaterial =
     if (multiplexingEnabled) {
       sharedSecret
     } else {
       sharedSecretHash
     }
-  val keyBytes = terribleHkdf(hkdfInputKeyMaterial, hkdfSalt, "AirShield".toByteArray())
-  return SecretKeySpec(keyBytes, "AES")
+  return terribleHkdf(hkdfInputKeyMaterial, hkdfSalt, "AirShield".toByteArray())
 }
 
 fun computeHmacKey(
   sharedSecret: ByteArray,
   challenge: ByteArray,
   seed: ByteArray,
-  multiplexingEnabled: Boolean,
+  protocolVersion: Int,
 ): SecretKeySpec {
+  val multiplexingEnabled = protocolVersion == PROTOCOL_WITH_FLAGS_31
+  val hkdfEnabled = protocolVersion != PROTOCOL_WITH_FLAGS_0
+  if (!hkdfEnabled) {
+    // the protocol with parameters unset uses the same key gen for encryption and hmac
+    return SecretKeySpec(
+      computeEncryptionKeyImpl(sharedSecret, challenge, seed, protocolVersion),
+      "HmacSHA256",
+    )
+  }
   val sharedSecretHash = MessageDigest.getInstance("SHA-256").digest(sharedSecret)
   val md = MessageDigest.getInstance("SHA-256")
   md.update(seed)
